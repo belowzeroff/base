@@ -45,14 +45,43 @@ def find_paul_json_files(workspace_root: Path) -> list[Path]:
     Recursively scan workspace_root for .paul/paul.json files.
     Skips any path that has a hidden directory component (starts with '.').
     """
-    results = []
+    # Local patch: PAUL >=1.4 writes .paul/paul.toml instead of paul.json.
+    # Prefer paul.toml when both exist in the same project.
+    results = {}
     try:
-        for paul_json in workspace_root.rglob(".paul/paul.json"):
-            if not has_hidden_component(paul_json, workspace_root):
-                results.append(paul_json)
+        for pattern in (".paul/paul.json", ".paul/paul.toml"):
+            for manifest in workspace_root.rglob(pattern):
+                if not has_hidden_component(manifest, workspace_root):
+                    key = manifest.parent
+                    if key not in results or manifest.suffix == ".toml":
+                        results[key] = manifest
     except (OSError, PermissionError):
         pass
-    return results
+    return list(results.values())
+
+
+def load_paul_manifest(path: Path) -> dict:
+    """Load paul.json, or paul.toml normalized to the paul.json shape."""
+    if path.suffix != ".toml":
+        with open(path, "r") as f:
+            return json.load(f)
+    import tomllib
+    with open(path, "rb") as f:
+        t = tomllib.load(f)
+    phase = dict(t.get("phase", {}))
+    milestone = t.get("milestone", {})
+    stats = t.get("stats", {})
+    if "total" not in phase and "phases" in milestone:
+        phase["total"] = milestone.get("phases")
+    handoffs = sorted(path.parent.glob("HANDOFF*.md"))
+    data = dict(t)
+    data["phase"] = phase
+    data["timestamps"] = {"updated_at": stats.get("last_activity")}
+    data["handoff"] = {
+        "present": bool(handoffs),
+        "path": str(handoffs[-1]) if handoffs else None,
+    }
+    return data
 
 
 def should_sync(paul_data: dict) -> bool:
@@ -225,9 +254,8 @@ def main():
 
     for paul_json_path in paul_files:
         try:
-            with open(paul_json_path, "r") as f:
-                paul_data = json.load(f)
-        except (json.JSONDecodeError, OSError):
+            paul_data = load_paul_manifest(paul_json_path)
+        except (json.JSONDecodeError, OSError, ValueError, ImportError):
             continue  # Malformed or unreadable — skip silently
 
         name = paul_data.get("name")
